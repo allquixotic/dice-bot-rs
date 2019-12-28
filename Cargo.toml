@@ -1,21 +1,22 @@
 [package]
 name = "dice-bot"
-version = "0.5.0-alpha1"
+version = "0.6.0-alpha1"
 authors = ["Lokathor <zefria@gmail.com>"]
 repository = "https://github.com/Lokathor/dice-bot-rs"
 readme = "README.md"
 keywords = ["discord","dice"]
 description = "A discord bot to roll RPG dice rolls."
-license = "0BSD"
+license = "ZLIB"
 publish = false
 edition = "2018"
 
 [dependencies]
-serenity = "0.6.3"
-randomize = "3.0.0"
-getrandom = "0.1"
-lokacore = "0.2"
+serenity = "0.7.4"
+randomize = "3.0.1"
+getrandom = "0.1.13"
+lokacore = "0.3.0"
 lazy_static = "1.4.0"
+regex = "1"
 
 [profile.release]
 lto = true

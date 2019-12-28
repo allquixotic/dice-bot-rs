@@ -10,6 +10,7 @@ use serenity::{
   framework::standard::{macros::*, *},
   model::{channel::*, event::*, gateway::*, id::*},
   prelude::*,
+  utils::*,
 };
 use std::{
   collections::{HashMap, HashSet},
@@ -83,7 +84,7 @@ fn main() {
           .ignore_webhooks(true)
           .on_mention(Some(bot_id))
           .owners(vec![userid].into_iter().collect())
-          .prefixes(vec![","])
+          .prefixes(vec!["?", ","])
           .no_dm_prefix(true)
           .delimiter(" ")
           .case_insensitivity(true)
@@ -231,7 +232,10 @@ fn after_sundown(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult
 #[usage = "EXPRESSION [...]"]
 fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
   let gen: &mut PCG32 = &mut global_gen();
-  let mut output = String::new();
+  let mut output;
+  let mut vec = Vec::new();
+  let mut mb = MessageBuilder::new();
+  let mut parsed_string = String::new();
   'exprloop: for dice_expression_str in args.rest().split_whitespace().take(20) {
     let plus_only_form = dice_expression_str.replace("-", "+-");
     let mut total: i32 = 0;
@@ -279,6 +283,7 @@ fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
       if num_sides == 0 {
         // do nothing with 0-sided dice
       } else if num_sides == 1 {
+        vec.push(num_dice);
         total += num_dice;
         sub_expressions.push(format!("{}", num_dice));
       } else {
@@ -293,12 +298,16 @@ fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
         };
         if num_dice > 0 {
           for _ in 0..num_dice {
-            total += range.sample(gen) as i32;
+            let pf = range.sample(gen) as i32;
+            vec.push(pf);
+            total += pf;
           }
           sub_expressions.push(format!("{}d{}", num_dice, num_sides));
         } else if num_dice < 0 {
           for _ in 0..num_dice.abs() {
-            total -= range.sample(gen) as i32;
+            let pq = range.sample(gen) as i32;
+            vec.push(pq);
+            total -= pq;
           }
           sub_expressions.push(format!("{}d{}", num_dice, num_sides));
         }
@@ -306,7 +315,7 @@ fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
       }
     }
     if sub_expressions.len() > 0 {
-      let mut parsed_string = sub_expressions[0].clone();
+      parsed_string = sub_expressions[0].clone();
       for sub_expression in sub_expressions.into_iter().skip(1) {
         if sub_expression.chars().nth(0) == Some('-') {
           parsed_string.push_str(&sub_expression);
@@ -315,15 +324,41 @@ fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
           parsed_string.push_str(&sub_expression);
         }
       }
-      output.push_str(&format!("Rolled {}: {}\n", parsed_string, total));
-    } else {
-      //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
-    }
+      let veq = format!("{:?}", vec).replace("[", "(").replace("]", ")");
+      mb.mention(&msg.author)
+      .push(" requested ")
+      .push(parsed_string.clone())
+      .push( " and rolled ")
+      .push_bold(total)
+      .push(". ");
+
+      if vec.len() > 1 {
+        mb.push(veq);
+      }
+    } 
   }
-  output.pop();
-  if output.len() > 0 {
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output) {
-      println!("Error sending message: {:?}", why);
+  output = mb.build();
+  if output.len() <= 0 {
+    mb = MessageBuilder::new();
+    mb.mention(&msg.author)
+    .push(" Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.");
+    output = mb.build();
+  }
+
+  if let Err(why) = msg.channel_id.say(&_ctx.http, output) {
+    println!("Error sending message: {:?}", why);
+    mb = MessageBuilder::new();
+    mb.mention(&msg.author)
+    .push(" Unable to process the supplied dice expression because the response would be too long: '")
+    .push(parsed_string)
+    .push("'.");
+    let mut built : String = mb.build();
+    if built.len() > 1999 {
+      built = "Unable to process the supplied dice expression because the response would be too long.".to_string();
+    }
+
+    if let Err(why2) = msg.channel_id.say(&_ctx.http, built) {
+      println!("Error sending message: {:?}", why2);
     }
   }
   Ok(())
