@@ -62,7 +62,16 @@ lazy_static! {
     },
     Err(_why2) => 20
   };
-  static ref PREFIXES: Vec<&'static str> = vec!["?", ","];
+  static ref PREFIXES: Vec<String> = match ::std::env::var("PREFIXES") {
+    Ok(prefixes_str) => {
+      let mut v : Vec<String> = Vec::new();
+      for prefix in prefixes_str.split_whitespace() {
+        v.push(prefix.to_string());
+      }
+      v
+    },
+    Err(_) => vec!["?".to_string(), ",".to_string()]
+  };
 }
 
 fn main() {
@@ -142,7 +151,7 @@ fn main() {
   }
 }
 
-fn starts_with_any(haystack : &String, needles : &Vec<&'static str>) -> Option<String> {
+fn starts_with_any(haystack : &String, needles : &Vec<String>) -> Option<String> {
   for needle in needles {
     if haystack.starts_with(needle) {
       return Some(needle.to_string());
