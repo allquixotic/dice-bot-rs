@@ -36,6 +36,13 @@ pub fn just_seed_the_global_gen() {
     Err(_) => *gen = PCG32::default(),
   }
 }
+pub fn seed(arr: [u64; 2]) {
+  let gen: &mut PCG32 = &mut global_gen();
+  *gen = PCG32::seed(arr[0], arr[1]);
+}
+pub fn seed_zero() {
+  seed([0, 0]);
+}
 
 trait ExplodingRange {
   fn explode(&self, gen: &mut PCG32) -> u32;

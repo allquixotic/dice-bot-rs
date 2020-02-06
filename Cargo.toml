@@ -11,9 +11,11 @@ publish = false
 edition = "2018"
 
 [dependencies]
-serenity = "0.7.4"
+serenity = "0.8.0"
+#For local Serenity hacking
+#serenity = { version = "^0", path = "../serenity"}
 randomize = "3.0.1"
-getrandom = "0.1.13"
+getrandom = "0.1.14"
 lokacore = "0.3.0"
 lazy_static = "1.4.0"
 regex = "1"

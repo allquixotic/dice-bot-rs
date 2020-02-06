@@ -5,11 +5,9 @@ use serenity::{
   model::channel::*,
 };
 
-group!({
-  name: "eote",
-  options: {},
-  commands: [eote]
-});
+#[group]
+#[commands(eote)]
+struct Eote;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Symbol {

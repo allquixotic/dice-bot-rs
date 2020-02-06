@@ -5,11 +5,9 @@ use serenity::{
   model::channel::*,
 };
 
-group!({
-  name: "earthdawn",
-  options: {},
-  commands: [earthdawn, earthdawn_karma, earthdawn_target]
-});
+#[group]
+#[commands(earthdawn, earthdawn_karma, earthdawn_target)]
+struct Earthdawn;
 
 /// Rolls a step roll, according to the 4th edition chart.
 pub fn step(gen: &mut PCG32, mut step: i32, karma: bool) -> i32 {
