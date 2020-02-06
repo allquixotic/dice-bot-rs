@@ -52,9 +52,9 @@ struct General;
 
 lazy_static! {
   static ref DICE_MASSAGE: Regex = Regex::new(r"\s+(\+|-)").unwrap();
-  static ref IMPLICIT_ROLL: Regex = Regex::new(r"^\s*(?:(\d*)((?:\+|-)\d+))?$").unwrap();
-  static ref WONKY_ROLL: Regex = Regex::new(r"^roll((\d*)(?:\+|-)\d+)$").unwrap();
-  static ref WONKY_TROLL: Regex = Regex::new(r"^troll((\d*)(?:\+|-)\d+)$").unwrap();
+  static ref IMPLICIT_ROLL: Regex = Regex::new(r"^\s*(?:(\d*)((?:\+|-)?\d+)??)?$").unwrap();
+  static ref WONKY_ROLL: Regex = Regex::new(r"^roll((\d*)(?:\+|-)?\d+)$").unwrap();
+  static ref WONKY_TROLL: Regex = Regex::new(r"^troll((\d*)(?:\+|-)?\d+)$").unwrap();
   static ref DEFAULT_DICE: u32 = match ::std::env::var("DEFAULT_DICE") {
     Ok(num) => match num.parse::<u32>() {
       Ok(realnum) => realnum,
@@ -315,6 +315,7 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
       Some(cap) => cap.as_str(),
       None => ""
     };
+    //println!("first_num: {}, first_num_num: {}, plus_num: {}", first_num, first_num_num, plus_num);
     if first_num_num > 1 {
       let temparg = format!("1d{}{} ", dd, plus_num);
       args_not_lower = temparg.repeat(first_num_num.try_into().unwrap()).trim().to_string();
@@ -681,9 +682,13 @@ fn champions(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
 //     let gen = &mut rng0();
 //     let user : User = User::default();
 //     let mut retval = format!("<@{}> requested {} and rolled **{}** ({}, {}).", user.id, "1d20+2", roll1+2, roll1, 2);
-//     assert_eq!(dice_get_string(gen, &user, "+2", false), retval);
-//     retval = format!("<@{}> requested {} and rolled **{}**.", user.id, "1d20", roll2);
-//     assert_eq!(dice_get_string(gen, &user, "", false), retval);
+//     assert_eq!(dice_get_string(&mut rng0(), &user, "+2", false), retval);
+
+//     retval = format!("<@{}> requested {} and rolled **{}**.", user.id, "1d20", roll1);
+//     assert_eq!(dice_get_string(&mut rng0(), &user, "", false), retval);
+
+//     retval = format!("<@{}> requested {} and rolled **{}**, **{}**.", user.id, "1d20 1d20", roll1, roll2);
+//     assert_eq!(dice_get_string(&mut rng0(), &user, "2", false), retval);
 //   }
 
 //   #[test]
