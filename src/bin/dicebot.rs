@@ -296,7 +296,7 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
       Some(cap) => cap.as_str(),
       None => "1"
     };
-    let first_num_num : u32 = match first_num.parse::<u32>() {
+    let mut first_num_num : u32 = match first_num.parse::<u32>() {
       Ok(p) => {
         if p < 1 {
           first_num = "1";
@@ -318,6 +318,9 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
     //println!("first_num: {}, first_num_num: {}, plus_num: {}", first_num, first_num_num, plus_num);
     if first_num_num > 1 {
       let temparg = format!("1d{}{} ", dd, plus_num);
+      if first_num_num > 50 {
+        first_num_num = 50;
+      }
       args_not_lower = temparg.repeat(first_num_num.try_into().unwrap()).trim().to_string();
     }
     else {
