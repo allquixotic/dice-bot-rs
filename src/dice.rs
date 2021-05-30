@@ -31,14 +31,26 @@ lazy_static! {
         },
         Err(_why2) => 20
       };
+    static ref D10_ONLY_CHANNELS: Vec<u64> = match ::std::env::var("D10_ONLY_ROLLS") {
+      Ok(rolls_str) => {
+        let mut v : Vec<u64> = Vec::new();
+        for channel in rolls_str.split_whitespace() {
+          v.push(channel.to_string().parse::<u64>().unwrap());
+        }
+        v
+      },
+      Err(_) => vec![]
+    };
 }
 
 #[group]
 #[commands(dice, ten)]
 pub struct General;
 
-fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
+fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId) -> String {
     let mut args_not_lower : String = args.to_string();
+    let must_roll_tens = "ERROR: You must roll a d10 dice in this channel, either using the ?ten command or ?roll 1d10.";
+    let mut invalid_sides = false;
     //println!("{}", args);
     if IMPLICIT_ROLL.is_match(args) {
       let caps = IMPLICIT_ROLL.captures(args).unwrap(); 
@@ -127,6 +139,7 @@ fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
           }
           None => 1,
         };
+
         if d_iter.next().is_some() {
           //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
           continue 'exprloop;
@@ -138,6 +151,10 @@ fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
           total += num_dice;
           sub_expressions.push(format!("{}", num_dice));
         } else {
+          if D10_ONLY_CHANNELS.contains(channel_id.as_u64()) && num_sides != 10 {
+            invalid_sides = true;
+            break 'exprloop;
+          }
           if num_dice > 0 {
             for _ in 0..num_dice {
               let pf: i32 = thread_rng().gen_range(1..=num_sides).try_into().unwrap();
@@ -196,6 +213,12 @@ fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
       .push(" Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.");
       output = mb.build();
     }
+    if invalid_sides == true {
+      mb = MessageBuilder::new();
+      mb.mention(author)
+      .push(must_roll_tens);
+      output = mb.build();
+    }
     return output;
   }
   
@@ -204,7 +227,7 @@ fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
   #[description = "Rolls a standard dice expression"]
   #[usage = "EXPRESSION [...]"]
   pub async fn dice(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), false);
+    let mut output = dice_get_string(&msg.author, args.rest(), false, &msg.channel_id);
   
     let yelling = msg.content.contains("ROLL");
     if yelling {
@@ -226,7 +249,7 @@ fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
   #[description = "Rolls a standard dice expression assuming d10"]
   #[usage = "EXPRESSION [...]"]
   pub async fn ten(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), true);
+    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id);
   
     let yelling = msg.content.contains("TEN");
     if yelling {
