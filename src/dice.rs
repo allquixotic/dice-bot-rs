@@ -4,7 +4,7 @@
 
 use std::convert::TryInto;
 use lazy_static::lazy_static;
-use randomize::*;
+use rand::*;
 use serenity::{
   client::{bridge::gateway::ShardManager, *},
   framework::standard::{macros::*, *},
@@ -20,9 +20,6 @@ use std::{
 };
 extern crate regex;
 use regex::*;
-
-use crate::global_gen::global_gen;
-use crate::ranges::*;
 
 lazy_static! {
     static ref DICE_MASSAGE: Regex = Regex::new(r"\s+(\+|-)").unwrap();
@@ -40,7 +37,7 @@ lazy_static! {
 #[commands(dice, ten)]
 pub struct General;
 
-fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> String {
+fn dice_get_string(author: &User, args: &str, ten: bool) -> String {
     let mut args_not_lower : String = args.to_string();
     //println!("{}", args);
     if IMPLICIT_ROLL.is_match(args) {
@@ -141,25 +138,16 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
           total += num_dice;
           sub_expressions.push(format!("{}", num_dice));
         } else {
-          let range = match num_sides {
-            4 => D4,
-            6 => D6,
-            8 => D8,
-            10 => D10,
-            12 => D12,
-            20 => D20,
-            _ => RandRangeU32::new(1, num_sides),
-          };
           if num_dice > 0 {
             for _ in 0..num_dice {
-              let pf = range.sample(gen) as i32;
+              let pf: i32 = thread_rng().gen_range(1..=num_sides).try_into().unwrap();
               vec.push(pf);
               total += pf;
             }
             sub_expressions.push(format!("{}d{}", num_dice, num_sides));
           } else if num_dice < 0 {
             for _ in 0..num_dice.abs() {
-              let pq = range.sample(gen) as i32;
+              let pq: i32 = thread_rng().gen_range(1..=num_sides).try_into().unwrap();
               vec.push(pq);
               total -= pq;
             }
@@ -215,19 +203,18 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
   #[aliases("roll", "dice")]
   #[description = "Rolls a standard dice expression"]
   #[usage = "EXPRESSION [...]"]
-  pub fn dice(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
-    let gen: &mut PCG32 = &mut global_gen();
-    let mut output = dice_get_string(gen, &msg.author, args.rest(), false);
+  pub async fn dice(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    let mut output = dice_get_string(&msg.author, args.rest(), false);
   
     let yelling = msg.content.contains("ROLL");
     if yelling {
       output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
     }
   
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output) {
+    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
       println!("Error sending message: {:?}", why);
       let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built) {
+      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
         println!("Error sending message: {:?}", why2);
       }
     }
@@ -238,19 +225,18 @@ fn dice_get_string(gen: &mut PCG32, author: &User, args: &str, ten: bool) -> Str
   #[aliases("ten")]
   #[description = "Rolls a standard dice expression assuming d10"]
   #[usage = "EXPRESSION [...]"]
-  pub fn ten(_ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
-    let gen: &mut PCG32 = &mut global_gen();
-    let mut output = dice_get_string(gen, &msg.author, args.rest(), true);
+  pub async fn ten(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    let mut output = dice_get_string(&msg.author, args.rest(), true);
   
     let yelling = msg.content.contains("TEN");
     if yelling {
       output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
     }
   
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output) {
+    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
       println!("Error sending message: {:?}", why);
       let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built) {
+      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
         println!("Error sending message: {:?}", why2);
       }
     }

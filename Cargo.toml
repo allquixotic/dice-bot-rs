@@ -1,6 +1,6 @@
 [package]
 name = "dice-bot"
-version = "0.6.0-coorbin"
+version = "0.6.1-coorbin"
 authors = ["Lokathor <zefria@gmail.com>"]
 repository = "https://github.com/Lokathor/dice-bot-rs"
 readme = "README.md"
@@ -11,15 +11,19 @@ publish = false
 edition = "2018"
 
 [dependencies]
-serenity = "0.8"
+serenity = "0"
 #For local Serenity hacking
 #serenity = { version = "^0", path = "../serenity"}
-randomize = "3.0"
-getrandom = "0.2"
-lokacore = "0.3"
-lazy_static = "1.4"
+rand = "0"
+getrandom = "0"
+lokacore = "0"
+lazy_static = "1"
 regex = "1"
-bytemuck = "1.4"
+bytemuck = "1"
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread"]
 
 [profile.release]
 lto = true
