@@ -20,6 +20,7 @@ lokacore = "0"
 lazy_static = "1"
 regex = "1"
 bytemuck = "1"
+fancy-regex = "0"
 
 [dependencies.tokio]
 version = "1"

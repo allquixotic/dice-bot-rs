@@ -20,10 +20,12 @@ use std::{
 };
 extern crate regex;
 use regex::*;
+use fancy_regex::Regex;
 
 lazy_static! {
-    static ref DICE_MASSAGE: Regex = Regex::new(r"\s+(\+|-)").unwrap();
-    static ref IMPLICIT_ROLL: Regex = Regex::new(r"^\s*(?:(\d*)((?:\+|-)?\d+)??)?$").unwrap();
+    static ref DICE_MASSAGE: regex::Regex = regex::Regex::new(r"\s+(\+|-)").unwrap();
+    static ref IMPLICIT_ROLL: regex::Regex = regex::Regex::new(r"^\s*(?:(\d*)((?:\+|-)?\d+)??)?$").unwrap();
+    static ref A_NUM: fancy_regex::Regex = Regex::new(r"(\d+)").unwrap();
     static ref DEFAULT_DICE: u32 = match ::std::env::var("DEFAULT_DICE") {
         Ok(num) => match num.parse::<u32>() {
           Ok(realnum) => realnum,
@@ -44,13 +46,17 @@ lazy_static! {
 }
 
 #[group]
-#[commands(dice, ten)]
+#[commands(dice, ten, rollsp, tensp)]
 pub struct General;
 
-fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId) -> String {
+fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId, do_spoiler: bool) -> String {
     let mut args_not_lower : String = args.to_string();
     let must_roll_tens = "ERROR: You must roll a d10 dice in this channel, either using the ?ten command or ?roll 1d10.";
     let mut invalid_sides = false;
+    let spoiler_str = match do_spoiler {
+      true => "||",
+      false => ""
+    };
     //println!("{}", args);
     if IMPLICIT_ROLL.is_match(args) {
       let caps = IMPLICIT_ROLL.captures(args).unwrap(); 
@@ -186,10 +192,7 @@ fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId)
         let veq = format!("{:?}", vec).replace("[", "(").replace("]", ")");
         if first_iter {
           mb.mention(author)
-          .push(" requested ")
-          .push(&args_not_lower)
-          .push( " and rolled ")
-          .push_bold(total);
+          .push(format!(" requested {} and {}rolled {}", &args_not_lower, spoiler_str, total));
         }
         else {
           mb.push(", ")
@@ -197,14 +200,13 @@ fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId)
         }
         
         if vec.len() > 1 {
-          mb.push(" ")
-          .push(veq);
+          mb.push(veq);
         }
       } 
       first_iter = false;
     }
     if mb.build().len() > 0 {
-      mb.push(".");
+      mb.push(format!("{}.", spoiler_str));
     }
     output = mb.build();
     if output.len() <= 0 {
@@ -227,9 +229,31 @@ fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId)
   #[description = "Rolls a standard dice expression"]
   #[usage = "EXPRESSION [...]"]
   pub async fn dice(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), false, &msg.channel_id);
+    let mut output = dice_get_string(&msg.author, args.rest(), false, &msg.channel_id, false);
   
     let yelling = msg.content.contains("ROLL");
+    if yelling {
+      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
+    }
+  
+    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
+      println!("Error sending message: {:?}", why);
+      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
+      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
+        println!("Error sending message: {:?}", why2);
+      }
+    }
+    Ok(())
+  }
+
+  #[command]
+  #[aliases("rollsp")]
+  #[description = "Rolls a standard dice expression and spoilers it"]
+  #[usage = "EXPRESSION [...]"]
+  pub async fn rollsp(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, true);
+  
+    let yelling = msg.content.contains("ROLLSP");
     if yelling {
       output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
     }
@@ -249,9 +273,31 @@ fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId)
   #[description = "Rolls a standard dice expression assuming d10"]
   #[usage = "EXPRESSION [...]"]
   pub async fn ten(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id);
+    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, false);
   
     let yelling = msg.content.contains("TEN");
+    if yelling {
+      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
+    }
+  
+    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
+      println!("Error sending message: {:?}", why);
+      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
+      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
+        println!("Error sending message: {:?}", why2);
+      }
+    }
+    Ok(())
+  }
+
+  #[command]
+  #[aliases("tensp")]
+  #[description = "Rolls a standard dice expression assuming d10"]
+  #[usage = "EXPRESSION [...]"]
+  pub async fn tensp(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, true);
+  
+    let yelling = msg.content.contains("TENSP");
     if yelling {
       output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
     }

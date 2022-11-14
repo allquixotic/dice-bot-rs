@@ -54,8 +54,8 @@ impl EventHandler for Handler {
 }
 
 lazy_static! {
-  static ref WONKY_ROLL: Regex = Regex::new(r"^roll((\d*)(?:\+|-)?\d+)$").unwrap();
-  static ref WONKY_TEN: Regex = Regex::new(r"^ten((\d*)(?:\+|-)?\d+)$").unwrap();
+  static ref WONKY_ROLL: Regex = Regex::new(r"^roll(sp)?((\d*)(?:\+|-)?\d+)$").unwrap();
+  static ref WONKY_TEN: Regex = Regex::new(r"^ten(sp)?((\d*)(?:\+|-)?\d+)$").unwrap();
   static ref PREFIXES: Vec<String> = match ::std::env::var("PREFIXES") {
     Ok(prefixes_str) => {
       let mut v : Vec<String> = Vec::new();
@@ -74,14 +74,27 @@ async fn unknown_command(_ctx: &Context, _msg: &Message, _unknown_command_name: 
   match starts_with_any(&_msg.content, &*PREFIXES) {
     Some(prefix) => {
       let snip = &_msg.content.to_lowercase()[prefix.len()..];
+      let has_sp = snip.contains("sp");
+      let addl_len = match has_sp {
+        true => 2,
+        false => 0
+      };
       if WONKY_ROLL.is_match(snip) {
-        match dice(_ctx, _msg, Args::new(&_msg.content[prefix.len()+4..], &[Delimiter::Single(' ')])).await {
+        let call = match has_sp {
+          true => rollsp,
+          false => dice
+        };
+        match call(_ctx, _msg, Args::new(&_msg.content[prefix.len()+4+addl_len..], &[Delimiter::Single(' ')])).await {
           Ok(_) => (),
           Err(why) => println!("{:?}", why)
         };
       }
       else if WONKY_TEN.is_match(snip) {
-        match ten(_ctx, _msg, Args::new(&_msg.content[prefix.len()+3..], &[Delimiter::Single(' ')])).await {
+        let call = match has_sp {
+          true => tensp,
+          false => ten
+        };
+        match call(_ctx, _msg, Args::new(&_msg.content[prefix.len()+3+addl_len..], &[Delimiter::Single(' ')])).await {
           Ok(_) => (),
           Err(why) => println!("{:?}", why)
         };
@@ -101,7 +114,7 @@ async fn main() {
   let userid: UserId = UserId(userid_str.parse::<u64>().unwrap());
   let _prefixes = &::std::env::var("PREFIXES").unwrap_or_else(|_| "".to_string());
 
-  let http = Http::new_with_token(&token);
+  let http = Http::new(&token);
 
   // We will fetch your bot's owners and id
   let (_owners, bot_id) = match http.get_current_application_info().await {
@@ -143,7 +156,7 @@ async fn main() {
   .help(&MY_HELP)
   .unrecognised_command(unknown_command);
 
-  let mut client = Client::builder(&token)
+  let mut client = Client::builder(&token, GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILD_MESSAGES | GatewayIntents::GUILD_MEMBERS | GatewayIntents::GUILDS)
       .event_handler(Handler)
       .framework(framework)
       .await
