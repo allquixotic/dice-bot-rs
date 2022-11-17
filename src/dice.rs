@@ -189,10 +189,10 @@ fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId,
             parsed_string.push_str(&sub_expression);
           }
         }
-        let veq = format!("{:?}", vec).replace("[", "(").replace("]", ")");
+        let veq = format!(" {:?}", vec).replace("[", "(").replace("]", ")");
         if first_iter {
           mb.mention(author)
-          .push(format!(" requested {} and {}rolled {}", &args_not_lower, spoiler_str, total));
+          .push(format!(" requested {} and {}rolled **{}**", &args_not_lower, spoiler_str, total));
         }
         else {
           mb.push(", ")
