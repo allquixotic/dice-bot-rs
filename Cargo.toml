@@ -1,30 +1,21 @@
 [package]
 name = "dice-bot"
-version = "0.6.1-coorbin"
+version = "0.7.0-coorbin"
 authors = ["Lokathor <zefria@gmail.com>"]
-repository = "https://github.com/Lokathor/dice-bot-rs"
+repository = "https://github.com/allquixotic/dice-bot-rs"
 readme = "README.md"
-keywords = ["discord","dice"]
+keywords = ["discord", "dice"]
 description = "A discord bot to roll RPG dice rolls."
 license = "ZLIB"
 publish = false
-edition = "2018"
+edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
-serenity = "0"
-#For local Serenity hacking
-#serenity = { version = "^0", path = "../serenity"}
-rand = "0"
-getrandom = "0"
-lokacore = "0"
-lazy_static = "1"
-regex = "1"
-bytemuck = "1"
-fancy-regex = "0"
-
-[dependencies.tokio]
-version = "1"
-features = ["macros", "rt-multi-thread"]
+rand = "0.10.3"
+regex = "1.13.1"
+serenity = { version = "0.12.5", default-features = false, features = ["client", "gateway", "model", "native_tls_backend"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 
 [profile.release]
 lto = true

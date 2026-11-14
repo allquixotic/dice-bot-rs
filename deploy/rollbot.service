@@ -1,0 +1,18 @@
+# Installed on dcprod as /etc/systemd/system/rollbot.service.
+# Secrets: dotenvx-encrypted .env plus its private key in .env.keys, both in WorkingDirectory (mode 600).
+[Unit]
+Description=Rollbot (dice-bot-rs Discord dice roller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/dice-bot-rs
+ExecStart=/usr/local/bin/dotenvx run -- /home/user/dice-bot-rs/target/release/dicebot
+Restart=on-failure
+RestartSec=30s
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

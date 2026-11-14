@@ -1,390 +1,364 @@
-#![allow(unused_imports)]
-#![allow(clippy::write_with_newline)]
-#![allow(clippy::len_zero)]
+//! Dice expression evaluation and reply formatting. Pure: randomness comes from
+//! the `roll` callback so tests are deterministic.
 
-use std::convert::TryInto;
-use lazy_static::lazy_static;
-use rand::*;
-use serenity::{
-  client::{bridge::gateway::ShardManager, *},
-  framework::standard::{macros::*, *},
-  model::{channel::*, event::*, gateway::*, id::*, user::User},
-  prelude::*,
-  utils::*,
-};
-use std::{
-  collections::{HashMap, HashSet},
-  fmt::Write,
-  process::{Command, Stdio},
-  sync::Arc,
-};
-extern crate regex;
-use regex::*;
-use fancy_regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref DICE_MASSAGE: regex::Regex = regex::Regex::new(r"\s+(\+|-)").unwrap();
-    static ref IMPLICIT_ROLL: regex::Regex = regex::Regex::new(r"^\s*(?:(\d*)((?:\+|-)?\d+)??)?$").unwrap();
-    static ref A_NUM: fancy_regex::Regex = Regex::new(r"(\d+)").unwrap();
-    static ref DEFAULT_DICE: u32 = match ::std::env::var("DEFAULT_DICE") {
-        Ok(num) => match num.parse::<u32>() {
-          Ok(realnum) => realnum,
-          Err(why) => panic!("DEFAULT_DICE environment variable is not a number. {:?}", why),
-        },
-        Err(_why2) => 20
-      };
-    static ref D10_ONLY_CHANNELS: Vec<u64> = match ::std::env::var("D10_ONLY_ROLLS") {
-      Ok(rolls_str) => {
-        let mut v : Vec<u64> = Vec::new();
-        for channel in rolls_str.split_whitespace() {
-          v.push(channel.to_string().parse::<u64>().unwrap());
-        }
-        v
-      },
-      Err(_) => vec![]
-    };
+use regex::Regex;
+
+/// Discord rejects messages longer than this many characters.
+pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
+const MAX_EXPRESSIONS: usize = 50;
+const MAX_TERMS: usize = 70;
+const MAX_DICE: i64 = 5_000;
+const MAX_SIDES: u32 = 4_000_000;
+const MAX_IMPLICIT_ROLLS: u32 = 50;
+const NOT_UNDERSTOOD: &str = "Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.";
+const MUST_ROLL_TENS: &str =
+  "ERROR: You must roll a d10 dice in this channel, either using the ?ten command or ?roll 1d10.";
+
+/// Whitespace before a sign joins terms: "1d20 +2" means "1d20+2".
+static SPACE_BEFORE_SIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+([+-])").unwrap());
+/// Bare counts/modifiers such as "", "3", "+2" or "3-1" roll the default die.
+static IMPLICIT_ROLL: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"^\s*(?:(\d*)([+-]?\d+)??)?$").unwrap());
+
+#[derive(Debug, Clone, Copy)]
+pub struct RollOptions {
+  /// Sides used for implicit rolls (20 normally, 10 for `ten`).
+  pub default_sides: u32,
+  /// Channel only allows d10s.
+  pub d10_only: bool,
+  /// Wrap the result in Discord spoiler bars.
+  pub spoiler: bool,
 }
 
-#[group]
-#[commands(dice, ten, rollsp, tensp)]
-pub struct General;
+#[derive(Debug, PartialEq, Eq)]
+struct Evaluated {
+  total: i64,
+  /// Individual dice and constants, shown when there is more than one.
+  parts: Vec<i64>,
+}
 
-fn dice_get_string(author: &User, args: &str, ten: bool, channel_id: &ChannelId, do_spoiler: bool) -> String {
-    let mut args_not_lower : String = args.to_string();
-    let must_roll_tens = "ERROR: You must roll a d10 dice in this channel, either using the ?ten command or ?roll 1d10.";
-    let mut invalid_sides = false;
-    let spoiler_str = match do_spoiler {
-      true => "||",
-      false => ""
-    };
-    //println!("{}", args);
-    if IMPLICIT_ROLL.is_match(args) {
-      let caps = IMPLICIT_ROLL.captures(args).unwrap(); 
-      let mut dd : u32 = *DEFAULT_DICE;
-      if ten {
-        dd = 10;
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+  Rolled {
+    requested: String,
+    results: Vec<Evaluated>,
+  },
+  NotUnderstood,
+  MustRollTens,
+}
+
+/// Expands implicit rolls: "" -> "1d20", "+2" -> "1d20+2", "3" -> "1d20 1d20 1d20".
+fn expand_implicit(args: &str, default_sides: u32) -> String {
+  let Some(caps) = IMPLICIT_ROLL.captures(args) else {
+    return args.to_string();
+  };
+  let modifier = caps.get(2).map_or("", |m| m.as_str());
+  let count = caps
+    .get(1)
+    .and_then(|m| m.as_str().parse::<u32>().ok())
+    .unwrap_or(1)
+    .max(1);
+  if count > 1 {
+    let one = format!("1d{default_sides}{modifier}");
+    vec![one; count.min(MAX_IMPLICIT_ROLLS) as usize].join(" ")
+  } else {
+    format!("1d{default_sides}{modifier}")
+  }
+}
+
+fn evaluate(args: &str, options: RollOptions, roll: &mut impl FnMut(u32) -> u32) -> Outcome {
+  let requested = expand_implicit(args, options.default_sides);
+  let normalized = SPACE_BEFORE_SIGN
+    .replace_all(&requested.to_lowercase(), "$1")
+    .into_owned();
+  let mut results = Vec::new();
+
+  'expression: for expression in normalized.split_whitespace().take(MAX_EXPRESSIONS) {
+    let mut total = 0i64;
+    let mut parts = Vec::new();
+    let mut has_terms = false;
+    for term in expression.replace('-', "+-").split('+').take(MAX_TERMS) {
+      if term.is_empty() {
+        continue;
       }
-      let mut first_num = match caps.get(1) {
-        Some(cap) => cap.as_str(),
-        None => "1"
+      let mut pieces = term.split('d');
+      let count_text = pieces.next().unwrap_or_default();
+      let count = if count_text.is_empty() {
+        1
+      } else {
+        match count_text.parse::<i64>() {
+          Ok(n) => n.clamp(-MAX_DICE, MAX_DICE),
+          Err(_) => continue 'expression,
+        }
       };
-      let mut first_num_num : u32 = match first_num.parse::<u32>() {
-        Ok(p) => {
-          if p < 1 {
-            first_num = "1";
-            1
-          }
-          else {
-            p
-          }
+      let sides = match pieces.next() {
+        Some(text) => match text.parse::<u32>() {
+          Ok(n) => n.min(MAX_SIDES),
+          Err(_) => continue 'expression,
         },
-        Err(_) => {
-          first_num = "1";
-          1
-        }
+        None => 1,
       };
-      let plus_num = match caps.get(2) {
-        Some(cap) => cap.as_str(),
-        None => ""
-      };
-      //println!("first_num: {}, first_num_num: {}, plus_num: {}", first_num, first_num_num, plus_num);
-      if first_num_num > 1 {
-        let temparg = format!("1d{}{} ", dd, plus_num);
-        if first_num_num > 50 {
-          first_num_num = 50;
-        }
-        args_not_lower = temparg.repeat(first_num_num.try_into().unwrap()).trim().to_string();
+      if pieces.next().is_some() {
+        continue 'expression;
       }
-      else {
-        args_not_lower = format!("{}d{}{}", first_num, dd, plus_num);
-      }
-    }
-    let argslower = DICE_MASSAGE.replace_all(&args_not_lower.to_lowercase(), "$1").to_string();
-    let mut output;
-    let mut mb = MessageBuilder::new();
-    let mut parsed_string;
-    let mut first_iter = true;
-    'exprloop: for dice_expression_str in argslower.split_whitespace().take(50) {
-      let mut vec = Vec::new();
-      let plus_only_form = dice_expression_str.replace("-", "+-");
-      let mut total: i32 = 0;
-      let mut sub_expressions = vec![];
-      for sub_expression in plus_only_form.split('+').take(70) {
-        if sub_expression.len() == 0 {
-          continue;
+      match sides {
+        0 => {}
+        1 => {
+          parts.push(count);
+          total += count;
+          has_terms = true;
         }
-        let mut d_iter = sub_expression.split('d');
-        let num_dice: i32 = match d_iter.next() {
-          Some(num_dice_str) => {
-            if num_dice_str.len() > 0 {
-              match num_dice_str.parse::<i32>() {
-                Ok(num) => num.max(-5_000).min(5_000),
-                Err(_) => {
-                  //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
-                  continue 'exprloop;
-                }
-              }
-            } else {
-              1
-            }
+        _ => {
+          if options.d10_only && sides != 10 {
+            return Outcome::MustRollTens;
           }
-          None => {
-            //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
-            continue 'exprloop;
+          let sign = count.signum();
+          for _ in 0..count.abs() {
+            let value = i64::from(roll(sides));
+            parts.push(value);
+            total += sign * value;
           }
-        };
-        let num_sides: u32 = match d_iter.next() {
-          Some(num_sides_str) => {
-            match num_sides_str.parse::<u32>() {
-              Ok(num) => num.min(4_000_000),
-              Err(_) => {
-                //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
-                continue 'exprloop;
-              }
-            }
-          }
-          None => 1,
-        };
-
-        if d_iter.next().is_some() {
-          //msg.react(ReactionType::Unicode(EMOJI_QUESTION.to_string())).ok();
-          continue 'exprloop;
-        }
-        if num_sides == 0 {
-          // do nothing with 0-sided dice
-        } else if num_sides == 1 {
-          vec.push(num_dice);
-          total += num_dice;
-          sub_expressions.push(format!("{}", num_dice));
-        } else {
-          if D10_ONLY_CHANNELS.contains(channel_id.as_u64()) && num_sides != 10 {
-            invalid_sides = true;
-            break 'exprloop;
-          }
-          if num_dice > 0 {
-            for _ in 0..num_dice {
-              let pf: i32 = thread_rng().gen_range(1..=num_sides).try_into().unwrap();
-              vec.push(pf);
-              total += pf;
-            }
-            sub_expressions.push(format!("{}d{}", num_dice, num_sides));
-          } else if num_dice < 0 {
-            for _ in 0..num_dice.abs() {
-              let pq: i32 = thread_rng().gen_range(1..=num_sides).try_into().unwrap();
-              vec.push(pq);
-              total -= pq;
-            }
-            sub_expressions.push(format!("{}d{}", num_dice, num_sides));
-          }
-          // do nothing if num_dice == 0
+          has_terms |= count != 0;
         }
       }
-      if sub_expressions.len() > 0 {
-        parsed_string = sub_expressions[0].clone();
-        for sub_expression in sub_expressions.into_iter().skip(1) {
-          if sub_expression.chars().nth(0) == Some('-') {
-            parsed_string.push_str(&sub_expression);
-          } else {
-            parsed_string.push('+');
-            parsed_string.push_str(&sub_expression);
-          }
-        }
-        let veq = format!(" {:?}", vec).replace("[", "(").replace("]", ")");
-        if first_iter {
-          mb.mention(author)
-          .push(format!(" requested {} and {}rolled **{}**", &args_not_lower, spoiler_str, total));
-        }
-        else {
-          mb.push(", ")
-          .push_bold(total);
-        }
-        
-        if vec.len() > 1 {
-          mb.push(veq);
-        }
-      } 
-      first_iter = false;
     }
-    if mb.build().len() > 0 {
-      mb.push(format!("{}.", spoiler_str));
+    if has_terms {
+      results.push(Evaluated { total, parts });
     }
-    output = mb.build();
-    if output.len() <= 0 {
-      mb = MessageBuilder::new();
-      mb.mention(author)
-      .push(" Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.");
-      output = mb.build();
-    }
-    if invalid_sides == true {
-      mb = MessageBuilder::new();
-      mb.mention(author)
-      .push(must_roll_tens);
-      output = mb.build();
-    }
-    return output;
-  }
-  
-  #[command]
-  #[aliases("roll", "dice")]
-  #[description = "Rolls a standard dice expression"]
-  #[usage = "EXPRESSION [...]"]
-  pub async fn dice(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), false, &msg.channel_id, false);
-  
-    let yelling = msg.content.contains("ROLL");
-    if yelling {
-      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
-    }
-  
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
-      println!("Error sending message: {:?}", why);
-      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
-        println!("Error sending message: {:?}", why2);
-      }
-    }
-    Ok(())
   }
 
-  #[command]
-  #[aliases("rollsp")]
-  #[description = "Rolls a standard dice expression and spoilers it"]
-  #[usage = "EXPRESSION [...]"]
-  pub async fn rollsp(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, true);
-  
-    let yelling = msg.content.contains("ROLLSP");
-    if yelling {
-      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
-    }
-  
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
-      println!("Error sending message: {:?}", why);
-      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
-        println!("Error sending message: {:?}", why2);
-      }
-    }
-    Ok(())
+  if results.is_empty() {
+    Outcome::NotUnderstood
+  } else {
+    Outcome::Rolled { requested, results }
   }
-  
-  #[command]
-  #[aliases("ten")]
-  #[description = "Rolls a standard dice expression assuming d10"]
-  #[usage = "EXPRESSION [...]"]
-  pub async fn ten(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, false);
-  
-    let yelling = msg.content.contains("TEN");
-    if yelling {
-      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
+}
+
+fn render_rolled(
+  mention: &str,
+  requested: &str,
+  results: &[Evaluated],
+  spoiler: &str,
+  show_parts: bool,
+) -> String {
+  let mut text = String::new();
+  for (index, result) in results.iter().enumerate() {
+    if index == 0 {
+      text.push_str(&format!(
+        "{mention} requested {requested} and {spoiler}rolled **{}**",
+        result.total
+      ));
+    } else {
+      text.push_str(&format!(", **{}**", result.total));
     }
-  
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
-      println!("Error sending message: {:?}", why);
-      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
-        println!("Error sending message: {:?}", why2);
+    if show_parts && result.parts.len() > 1 {
+      let parts: Vec<String> = result.parts.iter().map(i64::to_string).collect();
+      text.push_str(&format!(" ({})", parts.join(", ")));
+    }
+  }
+  text.push_str(spoiler);
+  text.push('.');
+  text
+}
+
+/// Rolls `args` and formats the reply for `mention` (e.g. "<@123>"), keeping it
+/// within Discord's message limit: first drop the individual dice, then shorten
+/// the echoed expression. Totals always survive.
+pub fn roll_reply(
+  mention: &str,
+  args: &str,
+  options: RollOptions,
+  roll: &mut impl FnMut(u32) -> u32,
+) -> String {
+  match evaluate(args, options, roll) {
+    Outcome::NotUnderstood => format!("{mention} {NOT_UNDERSTOOD}"),
+    Outcome::MustRollTens => format!("{mention} {MUST_ROLL_TENS}"),
+    Outcome::Rolled { requested, results } => {
+      let spoiler = if options.spoiler { "||" } else { "" };
+      let full = render_rolled(mention, &requested, &results, spoiler, true);
+      if full.chars().count() <= DISCORD_MESSAGE_LIMIT {
+        return full;
       }
+      let totals = render_rolled(mention, &requested, &results, spoiler, false);
+      let length = totals.chars().count();
+      if length <= DISCORD_MESSAGE_LIMIT {
+        return totals;
+      }
+      let room = requested
+        .chars()
+        .count()
+        .saturating_sub(length - DISCORD_MESSAGE_LIMIT + 1);
+      let shortened: String = requested
+        .chars()
+        .take(room)
+        .chain(std::iter::once('…'))
+        .collect();
+      render_rolled(mention, &shortened, &results, spoiler, false)
     }
-    Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const ME: &str = "<@42>";
+  const D20: RollOptions = RollOptions {
+    default_sides: 20,
+    d10_only: false,
+    spoiler: false,
+  };
+
+  /// Rolls 1, 2, 3, ... (wrapping at the die size) so outputs are predictable.
+  fn counting() -> impl FnMut(u32) -> u32 {
+    let mut next = 0;
+    move |sides| {
+      next += 1;
+      (next - 1) % sides + 1
+    }
   }
 
-  #[command]
-  #[aliases("tensp")]
-  #[description = "Rolls a standard dice expression assuming d10"]
-  #[usage = "EXPRESSION [...]"]
-  pub async fn tensp(_ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    let mut output = dice_get_string(&msg.author, args.rest(), true, &msg.channel_id, true);
-  
-    let yelling = msg.content.contains("TENSP");
-    if yelling {
-      output = "Wow, okay! Is your caps lock on, or are you mad at me? :( ".to_owned() + &output;
-    }
-  
-    if let Err(why) = msg.channel_id.say(&_ctx.http, output).await {
-      println!("Error sending message: {:?}", why);
-      let built : String = "ERROR: Failed to send you a valid response, either because the response would be too long, or the Discord server didn't like it for some other reason. Please try again.".to_string();
-      if let Err(why2) = msg.channel_id.say(&_ctx.http, built).await {
-        println!("Error sending message: {:?}", why2);
-      }
-    }
-    Ok(())
+  fn max_roll(sides: u32) -> u32 {
+    sides
   }
-  
-//   #[cfg(test)]
-//   mod tests {
-//     use super::*;
-  
-//     fn rng0() -> PCG32 {
-//       return PCG32::seed(0,0);
-//     }
-  
-//     fn test_get_num(index: u32, die: u32) -> u32 {
-//       let mut rng = rng0();
-//       let rr = RandRangeU32::new(1, die);
-//       let mut retval : u32 = 0;
-//       for _i in 0..index+1 {
-//         retval = rr.sample(&mut rng);
-//       }
-//       return retval;
-//     }
-    
-//     #[test]
-//     fn dice_str_nonsense() {
-//       let gen = &mut rng0();
-//       let user : User = User::default();
-//       let args = " Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.";
-//       assert_eq!(dice_get_string(gen, &user, args, false), "<@210> Unable to process the supplied dice expression because I didn't understand the dice syntax you supplied.");
-//     }
-    
-//     #[test]
-//     fn dice_str_torture() {
-//       let tests: HashMap<&str, String> = 
-//       [
-//         ("1d10", format!("**{}**", test_get_num(0, 10))),
-//         ("1d10+1", format!("**{}** ({}, {})", test_get_num(0, 10)+1, test_get_num(0, 10), 1)),
-//         ("1d10+1 1D10", format!("**{}** ({}, {}), **{}**", test_get_num(0, 10)+1, test_get_num(0, 10), 1, test_get_num(1, 10))),
-//         ("1d20+1", format!("**{}** ({}, {})", test_get_num(0, 20)+1, test_get_num(0, 20), 1)),
-//         ("1d20+2 1d20+3", format!("**{}** ({}, {}), **{}** ({}, {})", test_get_num(0, 20)+2, test_get_num(0, 20), 2, test_get_num(1, 20)+3, test_get_num(1, 20), 3)),
-//         ("1d20 +2 1d20  +3", format!("**{}** ({}, {}), **{}** ({}, {})", test_get_num(0, 20)+2, test_get_num(0, 20), 2, test_get_num(1, 20)+3, test_get_num(1, 20), 3)),
-//         ("1D20 +2 1D20  +3", format!("**{}** ({}, {}), **{}** ({}, {})", test_get_num(0, 20)+2, test_get_num(0, 20), 2, test_get_num(1, 20)+3, test_get_num(1, 20), 3)),
-//       ]
-//       .iter().cloned().collect();
-//       let user : User = User::default();
-//       for (args, retnum) in tests {
-//         let retval = format!("<@{}> requested {} and rolled {}.", user.id, args, retnum);
-//         let gen = &mut rng0();
-//         assert_eq!(dice_get_string(gen, &user, args, false), retval);
-//       }
-//     }
-  
-//     #[test]
-//     fn dice_str_default() {
-//       let roll1 : u32 = test_get_num(0, *DEFAULT_DICE);
-//       let roll2 : u32 = test_get_num(1, *DEFAULT_DICE);
-//       let gen = &mut rng0();
-//       let user : User = User::default();
-//       let mut retval = format!("<@{}> requested {} and rolled **{}** ({}, {}).", user.id, "1d20+2", roll1+2, roll1, 2);
-//       assert_eq!(dice_get_string(&mut rng0(), &user, "+2", false), retval);
-  
-//       retval = format!("<@{}> requested {} and rolled **{}**.", user.id, "1d20", roll1);
-//       assert_eq!(dice_get_string(&mut rng0(), &user, "", false), retval);
-  
-//       retval = format!("<@{}> requested {} and rolled **{}**, **{}**.", user.id, "1d20 1d20", roll1, roll2);
-//       assert_eq!(dice_get_string(&mut rng0(), &user, "2", false), retval);
-//     }
-  
-//     #[test]
-//     fn ten_default() {
-//       let roll1 : u32 = test_get_num(0, 10);
-//         let roll2 : u32 = test_get_num(1, 10);
-//         let gen = &mut rng0();
-//         let user : User = User::default();
-//         let mut retval = format!("<@{}> requested {} and rolled **{}** ({}, {}).", user.id, "1d10+2", roll1+2, roll1, 2);
-//         assert_eq!(dice_get_string(gen, &user, "+2", true), retval);
-//         retval = format!("<@{}> requested {} and rolled **{}**.", user.id, "1d10", roll2);
-//         assert_eq!(dice_get_string(gen, &user, "", true), retval);
-//     }
-//   }
-  
+
+  #[test]
+  fn single_die_and_modifier() {
+    assert_eq!(
+      roll_reply(ME, "1d20", D20, &mut counting()),
+      "<@42> requested 1d20 and rolled **1**."
+    );
+    assert_eq!(
+      roll_reply(ME, "1d20+5", D20, &mut counting()),
+      "<@42> requested 1d20+5 and rolled **6** (1, 5)."
+    );
+    assert_eq!(
+      roll_reply(ME, "2d6-1", D20, &mut counting()),
+      "<@42> requested 2d6-1 and rolled **2** (1, 2, -1)."
+    );
+  }
+
+  #[test]
+  fn several_expressions_and_spaced_signs() {
+    assert_eq!(
+      roll_reply(ME, "1D20 +2 1d20  +3", D20, &mut counting()),
+      "<@42> requested 1D20 +2 1d20  +3 and rolled **3** (1, 2), **5** (2, 3)."
+    );
+  }
+
+  #[test]
+  fn implicit_rolls_use_the_default_die() {
+    assert_eq!(
+      roll_reply(ME, "", D20, &mut max_roll),
+      "<@42> requested 1d20 and rolled **20**."
+    );
+    assert_eq!(
+      roll_reply(ME, "+2", D20, &mut max_roll),
+      "<@42> requested 1d20+2 and rolled **22** (20, 2)."
+    );
+    assert_eq!(
+      roll_reply(ME, "3", D20, &mut max_roll),
+      "<@42> requested 1d20 1d20 1d20 and rolled **20**, **20**, **20**."
+    );
+    let ten = RollOptions {
+      default_sides: 10,
+      ..D20
+    };
+    assert_eq!(
+      roll_reply(ME, "-1", ten, &mut max_roll),
+      "<@42> requested 1d10-1 and rolled **9** (10, -1)."
+    );
+  }
+
+  #[test]
+  fn implicit_roll_count_is_capped() {
+    let reply = roll_reply(ME, "500", D20, &mut max_roll);
+    assert_eq!(reply.matches("**20**").count(), 50);
+  }
+
+  #[test]
+  fn negative_dice_subtract() {
+    assert_eq!(
+      roll_reply(ME, "1d20-1d4", D20, &mut max_roll),
+      "<@42> requested 1d20-1d4 and rolled **16** (20, 4)."
+    );
+  }
+
+  #[test]
+  fn spoiler_wraps_the_result() {
+    let spoiler = RollOptions {
+      spoiler: true,
+      ..D20
+    };
+    assert_eq!(
+      roll_reply(ME, "1d6", spoiler, &mut max_roll),
+      "<@42> requested 1d6 and ||rolled **6**||."
+    );
+  }
+
+  #[test]
+  fn nonsense_is_reported() {
+    let expected = format!("<@42> {NOT_UNDERSTOOD}");
+    assert_eq!(roll_reply(ME, "fireball", D20, &mut max_roll), expected);
+    assert_eq!(roll_reply(ME, "1d6d6", D20, &mut max_roll), expected);
+    assert_eq!(roll_reply(ME, "0d6", D20, &mut max_roll), expected);
+  }
+
+  #[test]
+  fn empty_leading_expression_keeps_the_mention() {
+    // Previously "0d6 1d20" produced ", **20**." with no mention.
+    assert_eq!(
+      roll_reply(ME, "0d6 1d20", D20, &mut max_roll),
+      "<@42> requested 0d6 1d20 and rolled **20**."
+    );
+  }
+
+  #[test]
+  fn d10_only_channels_reject_other_dice() {
+    let d10 = RollOptions {
+      d10_only: true,
+      ..D20
+    };
+    assert_eq!(
+      roll_reply(ME, "1d20", d10, &mut max_roll),
+      format!("<@42> {MUST_ROLL_TENS}")
+    );
+    assert_eq!(
+      roll_reply(ME, "2d10+3", d10, &mut max_roll),
+      "<@42> requested 2d10+3 and rolled **23** (10, 10, 3)."
+    );
+  }
+
+  #[test]
+  fn huge_totals_do_not_overflow() {
+    let reply = roll_reply(ME, "5000d4000000", D20, &mut max_roll);
+    assert!(reply.contains("rolled **20000000000**"), "{reply}");
+  }
+
+  #[test]
+  fn long_replies_drop_dice_then_shorten_the_echo() {
+    assert_eq!(
+      roll_reply(ME, "700d6", D20, &mut max_roll),
+      "<@42> requested 700d6 and rolled **4200**."
+    );
+
+    let long = format!("{}1d6", "1d6+".repeat(495));
+    let spoiler = RollOptions {
+      spoiler: true,
+      ..D20
+    };
+    let reply = roll_reply(ME, &long, spoiler, &mut max_roll);
+    assert_eq!(reply.chars().count(), DISCORD_MESSAGE_LIMIT);
+    assert!(reply.ends_with("… and ||rolled **420**||."), "{reply}");
+  }
+
+  #[test]
+  fn constants_are_clamped() {
+    assert_eq!(
+      roll_reply(ME, "1d1+99999", D20, &mut max_roll),
+      "<@42> requested 1d1+99999 and rolled **5001** (1, 5000)."
+    );
+  }
+}

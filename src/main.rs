@@ -1,247 +1,119 @@
-#![allow(unused_imports)]
-#![allow(clippy::write_with_newline)]
-#![allow(clippy::len_zero)]
+//! Discord dice bot. Configuration comes from the environment (see .env.example).
 
-use std::convert::TryInto;
-use lazy_static::lazy_static;
-use rand::*;
+mod commands;
+mod dice;
+
+use std::{
+  collections::HashSet,
+  env,
+  sync::atomic::{AtomicU64, Ordering},
+};
+
+use rand::RngExt;
 use serenity::{
   async_trait,
-  client::{bridge::gateway::ShardManager, *},
-  framework::standard::{macros::*, *},
-  model::{channel::*, event::*, gateway::*, id::*, user::User},
+  model::{channel::Message, event::ResumedEvent, gateway::Ready},
   prelude::*,
-  utils::*,
-  http::Http,
 };
-use std::{
-  collections::{HashMap, HashSet},
-  fmt::Write,
-  process::{Command, Stdio},
-  sync::Arc,
-  env,
-};
-extern crate regex;
-use regex::*;
-use tokio::*;
-use tokio::sync::*;
 
-mod dice;
-use dice::*;
+use commands::Settings;
 
-// A container type is created for inserting into the Client's `data`, which
-// allows for data to be accessible across all events and framework commands, or
-// anywhere else that has a copy of the `data` Arc.
-struct ShardManagerContainer;
+const SEND_FAILED: &str = "ERROR: Failed to send you a valid response, either because the response would be too long, \
+                           or the Discord server didn't like it for some other reason. Please try again.";
 
-impl TypeMapKey for ShardManagerContainer {
-  type Value = Arc<Mutex<ShardManager>>;
+fn settings_from_env() -> Result<Settings, String> {
+  let prefixes = match env::var("PREFIXES") {
+    Ok(text) => text.split_whitespace().map(str::to_string).collect(),
+    Err(_) => vec!["?".to_string(), ",".to_string()],
+  };
+  let default_sides = match env::var("DEFAULT_DICE") {
+    Ok(text) => text
+      .trim()
+      .parse()
+      .map_err(|_| format!("DEFAULT_DICE must be a whole number, got {text:?}"))?,
+    Err(_) => 20,
+  };
+  let d10_only_channels = env::var("D10_ONLY_ROLLS")
+    .unwrap_or_default()
+    .split_whitespace()
+    .map(|id| {
+      id.parse()
+        .map_err(|_| format!("D10_ONLY_ROLLS must list channel IDs, got {id:?}"))
+    })
+    .collect::<Result<HashSet<u64>, String>>()?;
+  Ok(Settings {
+    prefixes,
+    default_sides,
+    d10_only_channels,
+  })
 }
 
-struct CommandCounter;
-
-impl TypeMapKey for CommandCounter {
-  type Value = HashMap<String, u64>;
+struct Handler {
+  settings: Settings,
+  bot_id: AtomicU64,
 }
-
-pub struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
+  async fn message(&self, ctx: Context, msg: Message) {
+    if msg.author.bot || msg.webhook_id.is_some() {
+      return;
     }
-}
-
-lazy_static! {
-  static ref WONKY_ROLL: Regex = Regex::new(r"^roll(sp)?((\d*)(?:\+|-)?\d+)$").unwrap();
-  static ref WONKY_TEN: Regex = Regex::new(r"^ten(sp)?((\d*)(?:\+|-)?\d+)$").unwrap();
-  static ref PREFIXES: Vec<String> = match ::std::env::var("PREFIXES") {
-    Ok(prefixes_str) => {
-      let mut v : Vec<String> = Vec::new();
-      for prefix in prefixes_str.split_whitespace() {
-        v.push(prefix.to_string());
+    let bot_id = Some(self.bot_id.load(Ordering::Relaxed)).filter(|&id| id != 0);
+    let Some(invocation) = commands::parse(&msg.content, &self.settings.prefixes, bot_id) else {
+      return;
+    };
+    let reply = {
+      let mut rng = rand::rng();
+      commands::respond(
+        &invocation,
+        &self.settings,
+        msg.author.id.get(),
+        msg.channel_id.get(),
+        &mut |sides| rng.random_range(1..=sides),
+      )
+    };
+    if let Err(error) = msg.channel_id.say(&ctx.http, &reply).await {
+      eprintln!("Error sending reply in channel {}: {error}", msg.channel_id);
+      if let Err(error) = msg.channel_id.say(&ctx.http, SEND_FAILED).await {
+        eprintln!(
+          "Error sending failure notice in channel {}: {error}",
+          msg.channel_id
+        );
       }
-      v
-    },
-    Err(_) => vec!["?".to_string(), ",".to_string()]
-  };
-}
+    }
+  }
 
+  async fn ready(&self, _ctx: Context, ready: Ready) {
+    self.bot_id.store(ready.user.id.get(), Ordering::Relaxed);
+    println!(
+      "{} is connected! ({} guilds)",
+      ready.user.name,
+      ready.guilds.len()
+    );
+  }
 
-#[hook]
-async fn unknown_command(_ctx: &Context, _msg: &Message, _unknown_command_name: &str) {
-  match starts_with_any(&_msg.content, &*PREFIXES) {
-    Some(prefix) => {
-      let snip = &_msg.content.to_lowercase()[prefix.len()..];
-      let has_sp = snip.contains("sp");
-      let addl_len = match has_sp {
-        true => 2,
-        false => 0
-      };
-      if WONKY_ROLL.is_match(snip) {
-        let call = match has_sp {
-          true => rollsp,
-          false => dice
-        };
-        match call(_ctx, _msg, Args::new(&_msg.content[prefix.len()+4+addl_len..], &[Delimiter::Single(' ')])).await {
-          Ok(_) => (),
-          Err(why) => println!("{:?}", why)
-        };
-      }
-      else if WONKY_TEN.is_match(snip) {
-        let call = match has_sp {
-          true => tensp,
-          false => ten
-        };
-        match call(_ctx, _msg, Args::new(&_msg.content[prefix.len()+3+addl_len..], &[Delimiter::Single(' ')])).await {
-          Ok(_) => (),
-          Err(why) => println!("{:?}", why)
-        };
-      }
-    },
-    None => ()
-  };
+  async fn resume(&self, _ctx: Context, _event: ResumedEvent) {
+    println!("Gateway session resumed.");
+  }
 }
 
 #[tokio::main]
 async fn main() {
-  // Configure the client with your Discord bot token in the environment.
-  let token = env::var("DISCORD_TOKEN").expect(
-    "Expected a token in the environment",
-  );
-  let userid_str = &::std::env::var("USER_ID").expect("Could not obtain USER_ID");
-  let userid: UserId = UserId(userid_str.parse::<u64>().unwrap());
-  let _prefixes = &::std::env::var("PREFIXES").unwrap_or_else(|_| "".to_string());
-
-  let http = Http::new(&token);
-
-  // We will fetch your bot's owners and id
-  let (_owners, bot_id) = match http.get_current_application_info().await {
-      Ok(info) => {
-          let mut owners = HashSet::new();
-          if let Some(team) = info.team {
-              owners.insert(team.owner_user_id);
-          } else {
-              owners.insert(info.owner.id);
-          }
-          match http.get_current_user().await {
-              Ok(bot_id) => (owners, bot_id.id),
-              Err(why) => panic!("Could not access the bot id: {:?}", why),
-          }
-      },
-      Err(why) => panic!("Could not access application info: {:?}", why),
+  let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set (see .env.example)");
+  let settings = settings_from_env().unwrap_or_else(|error| panic!("{error}"));
+  let intents =
+    GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+  let handler = Handler {
+    settings,
+    bot_id: AtomicU64::new(0),
   };
-
-  let framework = StandardFramework::new()
-  .configure(|c| {
-    c.allow_dm(true)
-      .with_whitespace(WithWhiteSpace {
-        prefixes: true,
-        groups: true,
-        commands: true,
-      })
-      .ignore_bots(true)
-      .ignore_webhooks(true)
-      .on_mention(Some(bot_id))
-      .owners(vec![userid].into_iter().collect())
-      .prefixes(&*PREFIXES)
-      .no_dm_prefix(true)
-      .delimiter(" ")
-      .case_insensitivity(true)
-  })
-  .bucket("help", |b| b.delay(30)).await
-  .bucket("complicated", |b| b.delay(5).time_span(30).limit(2)).await
-  .group(&GENERAL_GROUP)
-  .help(&MY_HELP)
-  .unrecognised_command(unknown_command);
-
-  let mut client = Client::builder(&token, GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILD_MESSAGES | GatewayIntents::GUILD_MEMBERS | GatewayIntents::GUILDS)
-      .event_handler(Handler)
-      .framework(framework)
-      .await
-      .expect("Err creating client");
-
-  {
-      let mut data = client.data.write().await;
-      data.insert::<CommandCounter>(HashMap::default());
-      data.insert::<ShardManagerContainer>(Arc::clone(&client.shard_manager));
-  }
-
-  if let Err(why) = client.start().await {
-      println!("Client error: {:?}", why);
+  let mut client = Client::builder(&token, intents)
+    .event_handler(handler)
+    .await
+    .expect("Error creating client");
+  if let Err(error) = client.start().await {
+    eprintln!("Client error: {error}");
+    std::process::exit(1);
   }
 }
-
-fn starts_with_any(haystack : &String, needles : &Vec<String>) -> Option<String> {
-  for needle in needles {
-    if haystack.starts_with(needle) {
-      return Some(needle.to_string());
-    }
-  }
-  return None;
-}
-
-
-#[help]
-
-// This replaces the information that a user can pass
-// a command-name as argument to gain specific information about it.
-#[individual_command_tip =
-"Hello! If you want more information about a specific command, just pass the command as argument."]
-// Some arguments require a `{}` in order to replace it with contextual information.
-// In this case our `{}` refers to a command's name.
-#[command_not_found_text = "Could not find: `{}`."]
-// Define the maximum Levenshtein-distance between a searched command-name
-// and commands. If the distance is lower than or equal the set distance,
-// it will be displayed as a suggestion.
-// Setting the distance to 0 will disable suggestions.
-#[max_levenshtein_distance(3)]
-// When you use sub-groups, Serenity will use the `indention_prefix` to indicate
-// how deeply an item is indented.
-// The default value is "-", it will be changed to "+".
-#[indention_prefix = "+"]
-// On another note, you can set up the help-menu-filter-behaviour.
-// Here are all possible settings shown on all possible options.
-// First case is if a user lacks permissions for a command, we can hide the command.
-#[lacking_permissions = "Hide"]
-// If the user is nothing but lacking a certain role, we just display it hence our variant is `Nothing`.
-#[lacking_role = "Nothing"]
-// The last `enum`-variant is `Strike`, which ~~strikes~~ a command.
-#[wrong_channel = "Strike"]
-// Serenity will automatically analyse and generate a hint/tip explaining the possible
-// cases of ~~strikethrough-commands~~, but only if
-// `strikethrough_commands_tip_in_{dm, guild}` aren't specified.
-// If you pass in a value, it will be displayed instead.
-async fn my_help(
-    context: &Context,
-    msg: &Message,
-    args: Args,
-    help_options: &'static HelpOptions,
-    groups: &[&'static CommandGroup],
-    owners: HashSet<UserId>
-) -> CommandResult {
-    let _ = help_commands::with_embeds(context, msg, args, help_options, groups, owners).await;
-    Ok(())
-}
-
-// Commands can be created via the attribute `#[command]` macro.
-#[command]
-// Options are passed via subsequent attributes.
-// Make this command use the "complicated" bucket.
-#[bucket = "complicated"]
-async fn commands(ctx: &Context, msg: &Message) -> CommandResult {
-    let mut contents = "Commands used:\n".to_string();
-
-    let data = ctx.data.read().await;
-    let counter = data.get::<CommandCounter>().expect("Expected CommandCounter in TypeMap.");
-
-    for (k, v) in counter {
-        writeln!(contents, "- {name}: {amount}", name=k, amount=v)?;
-    }
-
-    msg.channel_id.say(&ctx.http, &contents).await?;
-
-    Ok(())
-}
-
